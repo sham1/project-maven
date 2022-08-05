@@ -29,17 +29,51 @@
 
 ;;; Code:
 (require 'cl-lib)
+(require 'dom)
 (require 'project)
+
+(defcustom project-maven-java-home nil
+  "A custom JAVA_HOME value to execute `mvn' with."
+  :type 'directory
+  :group 'project-maven)
 
 (cl-defmethod project-root ((project (head maven)))
   "Find the root of the PROJECT based in Maven's pom.xml."
-  (cadr project))
+  (cl-second project))
+
+(cl-defmethod project-external-roots ((project (head maven)))
+  "Find the external roots of the PROJECT based in Maven's pom.xml."
+  (cl-third project))
 
 (defun project-maven-try (dir)
-  "Try to find the first dominating pom.xml relative to DIR."
-  (let ((project-dir (locate-dominating-file dir "pom.xml")))
-    (when project-dir
-      (list 'maven project-dir))))
+  "Try to find the most dominant pom.xml relative to DIR."
+  (let ((dominator (locate-dominating-file dir "pom.xml")))
+    (when dominator
+      (let* ((above (file-name-directory (directory-file-name dominator)))
+	     (dominator2 (locate-dominating-file above "pom.xml")))
+	(while dominator2
+	  (setq dominator dominator2
+		above (file-name-directory (directory-file-name dominator))
+		dominator2 (locate-dominating-file above "pom.xml"))))
+      (let ((default-directory dominator)
+	    (external-roots nil)
+	    (xml-file (make-temp-file "project-maven-effective-pom")))
+	(if project-maven-java-home ; I wish there was a better way to do
+	    (let ((process-environment (cons (format "JAVA_HOME=%s" project-maven-java-home) process-environment)))
+	      (call-process "mvn" nil nil t "help:effective-pom" (concat "-Doutput=" xml-file)))
+	  (call-process "mvn" nil nil t "help:effective-pom" (concat "-Doutput=" xml-file)))
+	(with-temp-buffer
+	  (insert-file-contents-literally xml-file nil)
+	  (let* ((dom (libxml-parse-xml-region (point-min) (point-max)))
+		 (modules-tags (dom-by-tag dom 'modules)))
+	    (dolist (modules modules-tags)
+	      (dolist (module (cddr modules))
+		(cl-pushnew (file-name-concat dominator
+					      (cl-third module))
+			    external-roots
+			    :test #'string-equal)))))
+	(delete-file xml-file nil)
+	(list 'maven dominator external-roots)))))
 
 ;;;###autoload
 (add-to-list 'project-find-functions #'project-maven-try)
